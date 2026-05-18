@@ -1,0 +1,14 @@
+{
+  "name": "web-static-assets",
+  "version": "1.0.0",
+  "description": "Static web resource optimizer and delivery helper",
+  "private": true,
+  "license": "MIT",
+  "scripts": {
+    "dev": "netlify dev",
+    "build": "echo 'Build complete'"
+  },
+  "devDependencies": {
+    "netlify-cli": "latest"
+  }
+}
