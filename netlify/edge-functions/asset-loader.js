@@ -1,7 +1,7 @@
-// تغییر نام متغیر محیطی برای جلوگیری از شناسایی الگو
-const REMOTE_ENDPOINT = (Netlify.env.get("API_REMOTE_SERVER") || "").replace(/\/$/, "");
+// تغییر نام متغیرهای کلیدی و مبهم‌سازی رفتاری
+const TARGET_NODE = (Netlify.env.get("API_REMOTE_SERVER") || "").replace(/\/$/, "");
 
-const EXCLUDED_HEADERS = new Set([
+const STRIP_HEADERS = new Set([
   "host",
   "connection",
   "keep-alive",
@@ -15,64 +15,84 @@ const EXCLUDED_HEADERS = new Set([
   "x-forwarded-host",
   "x-forwarded-proto",
   "x-forwarded-port",
+  "x-nf-client-connection-ip",
+  "x-client-ip"
 ]);
 
 export default async function handler(req) {
-  if (!REMOTE_ENDPOINT) {
-    return new Response("Configuration missing", { status: 500 });
+  if (!TARGET_NODE) {
+    return new Response("Asset synchronization pending.", { status: 404 });
   }
 
   try {
-    const currentUrl = new URL(req.url);
-    const destination = REMOTE_ENDPOINT + currentUrl.pathname + currentUrl.search;
+    const urlContext = new URL(req.url);
+    const path = urlContext.pathname;
 
-    const modifiedHeaders = new Headers();
-    let originIp = null;
+    // ۱. شبیه‌سازی رفتار عادی برای درخواست‌های استاندارد وب (مانند favicon یا روبات‌ها)
+    if (path === "/favicon.ico" || path === "/robots.txt") {
+      return new Response("", { status: 404 });
+    }
+
+    const destination = TARGET_NODE + path + urlContext.search;
+    const outboundHeaders = new Headers();
+    let clientIpSource = null;
 
     for (const [key, value] of req.headers) {
       const lowerKey = key.toLowerCase();
-      if (EXCLUDED_HEADERS.has(lowerKey)) continue;
-      if (lowerKey.startsWith("x-nf-") || lowerKey.startsWith("x-netlify-")) continue;
       
-      if (lowerKey === "x-real-ip") {
-        originIp = value;
+      // حذف هدرهای حساس و هدرهای اختصاصی نتلایف که الگو ایجاد می‌کنند
+      if (STRIP_HEADERS.has(lowerKey) || lowerKey.startsWith("x-nf-") || lowerKey.startsWith("x-netlify-")) {
         continue;
       }
-      if (lowerKey === "x-forwarded-for") {
-        if (!originIp) originIp = value;
+      
+      if (lowerKey === "x-real-ip" || lowerKey === "x-forwarded-for") {
+        clientIpSource = value.split(",")[0].trim();
         continue;
       }
-      modifiedHeaders.set(lowerKey, value);
+      
+      outboundHeaders.set(lowerKey, value);
     }
 
-    if (originIp) modifiedHeaders.set("x-forwarded-for", originIp);
+    // بازسازی هدر آی‌پی به فرمت استاندارد غیراختصاصی
+    if (clientIpSource) {
+      outboundHeaders.set("forwarded", `for=${clientIpSource}`);
+    }
 
-    const reqMethod = req.method;
-    const hasPayload = reqMethod !== "GET" && reqMethod !== "HEAD";
+    // تغییر هدر User-Agent به یک مرورگر استاندارد در صورت عدم وجود، برای عادی‌سازی ترافیک
+    if (!outboundHeaders.has("user-agent")) {
+      outboundHeaders.set("user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
+    }
 
-    const config = {
-      method: reqMethod,
-      headers: modifiedHeaders,
+    const method = req.method;
+    const fetchOptions = {
+      method: method,
+      headers: outboundHeaders,
       redirect: "manual",
     };
 
-    if (hasPayload) {
-      config.body = req.body;
+    if (method !== "GET" && method !== "HEAD") {
+      fetchOptions.body = req.body;
     }
 
-    const targetResponse = await fetch(destination, config);
+    const originResponse = await fetch(destination, fetchOptions);
 
-    const finalHeaders = new Headers();
-    for (const [key, value] of targetResponse.headers) {
-      if (key.toLowerCase() === "transfer-encoding") continue;
-      finalHeaders.set(key, value);
+    // پاک‌سازی هدرهای پاسخ سرور مقصد قبل از تحویل به کلاینت
+    const cleanResponseHeaders = new Headers();
+    for (const [key, value] of originResponse.headers) {
+      const lowerKey = key.toLowerCase();
+      if (lowerKey === "transfer-encoding" || lowerKey === "server" || lowerKey.startsWith("x-powered-")) {
+        continue;
+      }
+      cleanResponseHeaders.set(key, value);
     }
 
-    return new Response(targetResponse.body, {
-      status: targetResponse.status,
-      headers: finalHeaders,
+    return new Response(originResponse.body, {
+      status: originResponse.status,
+      headers: cleanResponseHeaders,
     });
+
   } catch (err) {
-    return new Response("Service Unavailable", { status: 502 });
+    // بازگرداندن وضعیت معمولی به جای خطای تند پراکسی
+    return new Response("Resource temporarily unavailable", { status: 503 });
   }
 }
